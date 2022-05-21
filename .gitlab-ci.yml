@@ -1,0 +1,21 @@
+image: registry.gitlab.com/vuxx/dockerfiles/php-gen2:8.1
+
+stages:
+  - test
+  - release
+  - metrics
+
+cache:
+  key: ${CI_COMMIT_REF_SLUG}
+  paths:
+  - vendor/
+
+before_script:
+    - composer install
+
+publish:
+  stage: release
+  image: registry.gitlab.com/vuxx/dockerfiles/curl
+  before_script: []
+  script:
+    - scripts/gitlab-composer-publish

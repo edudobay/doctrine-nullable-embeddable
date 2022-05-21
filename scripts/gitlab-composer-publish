@@ -1,0 +1,77 @@
+#!/usr/bin/env bash
+
+# Adapted from
+# https://gitlab.com/gitlab-org/gitlab-foss/-/blob/master/lib/gitlab/ci/templates/Composer.gitlab-ci.yml
+
+set -o nounset -o errexit -o pipefail
+
+CURL=(curl)
+CURL_ACCESS_PACKAGES=(--header "Private-Token:$GITLAB_PACKAGES_TOKEN")
+CURL_PUBLISH=(--header "Job-Token:$CI_JOB_TOKEN")
+PACKAGES_URL="${CI_API_V4_URL}/projects/$CI_PROJECT_ID/packages"
+
+LOG() {
+    printf "[%s] %s\n" "$(date +'%F %T.%4N')" "$@" 1>&2
+}
+
+_curl() {
+    local response
+    response=$(${CURL[@]} -s -w "\n%{http_code}" "$@")
+    curl_status=$(echo "$response" | tail -n 1)
+    curl_body=$(echo "$response" | head -n 1)
+}
+
+package_name=${CI_PROJECT_NAMESPACE}/${CI_PROJECT_NAME}
+if [[ -z "${CI_COMMIT_TAG-}" ]]; then
+    version="branch=$CI_COMMIT_REF_NAME"
+    composer_version="dev-$CI_COMMIT_REF_NAME"
+else
+    version="tag=$CI_COMMIT_TAG"
+    composer_version="$CI_COMMIT_REF_NAME"
+fi
+
+# Currently, Composer packages cannot be overwritten. They need to be deleted and recreated.
+# https://gitlab.com/gitlab-org/gitlab/-/issues/244864
+delete_previous_package() {
+    _curl ${CURL_ACCESS_PACKAGES[@]} "${PACKAGES_URL}?package_type=composer&package_name=${package_name}"
+    if [[ $curl_status -ne 200 ]]; then
+        LOG "Could not query existing packages - HTTP status $curl_status - $curl_body"
+        return 1
+    fi
+
+    PACKAGE=$(echo "$curl_body" | jq -c --arg version "$composer_version" \
+        '.[] | select (.version == $version)')
+    PACKAGE_ID=$(echo "$PACKAGE" | jq -r '.id')
+
+    if [[ "$PACKAGE_ID" = "" ]]; then
+        LOG "No previous package version found ($package_name:$composer_version)"
+        return
+    fi
+
+    LOG "Found previous package: $(echo "$PACKAGE" | jq -r \
+        '"id=\(.id) name=\(.name) version=\(.version) created_at=\(.created_at)"')"
+
+    LOG "Deleting package $PACKAGE_ID"
+    _curl ${CURL_ACCESS_PACKAGES[@]} -X DELETE "${PACKAGES_URL}/${PACKAGE_ID}"
+    if [[ $curl_status -ne 204 ]]; then
+        LOG "Could not delete package - HTTP status $curl_status - $curl_body"
+        return 1
+    else
+        LOG "Deleted package - HTTP status $curl_status - $curl_body"
+        return 1
+    fi
+}
+
+upload_package() {
+    _curl ${CURL_PUBLISH[@]} --data $version "${PACKAGES_URL}/composer"
+
+    if [ $curl_status -eq 201 ]; then
+        LOG "Package created - HTTP status $curl_status - $curl_body"
+    else
+        LOG "Could not create package - HTTP status $curl_status - $curl_body";
+        return 1
+    fi
+}
+
+delete_previous_package || true
+upload_package
